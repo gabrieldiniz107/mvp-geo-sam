@@ -1,3 +1,25 @@
-venv
-checkpoints
-mvp_sam/__pycache__
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Checkpoints / weights
+checkpoints/*
+!checkpoints/.gitkeep
+!checkpoints/README.md
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/

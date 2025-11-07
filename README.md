@@ -37,11 +37,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Baixe o checkpoint do SAM (aprox. 360 MB) no site oficial e informe o caminho via variável de ambiente:
-
-```bash
-export SAM_CHECKPOINT_PATH="$(pwd)/checkpoints/sam_vit_b_01ec64.pth"
-```
+Baixe o checkpoint do SAM (aprox. 360 MB) no site oficial e coloque o arquivo `sam_vit_b_01ec64.pth` dentro de `checkpoints/` (já versionada com instruções). O app procura automaticamente ali; use a variável `SAM_CHECKPOINT_PATH` apenas se quiser apontar para outro local.
 
 > **Dica**: para Apple Silicon use `pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cpu` se ainda não tiver torch instalado.
 
@@ -61,12 +57,17 @@ A interface abre no navegador. Faça upload das imagens **antes** e **depois**, 
 ## Estratégias e parâmetros
 
 - **IoU para matching**: máscara só é pareada se IoU ≥ limiar (default 0.45)
+- **Peso Hausdorff**: o slider controla quanto o matching privilegia a distância de Hausdorff normalizada (0 = só IoU, 1 = só Hausdorff). O score final precisa passar por um limiar extra para ser considerado válido.
 - **Objetos novos**: máscaras na imagem *depois* sem par correspondente
 - **Objetos removidos**: máscaras na imagem *antes* sem par correspondente
 - **Objetos modificados**: pares com IoU válido porém variação de área ≥ limiar ou deslocamento de centróide ≥ limiar
 - **Filtro de área mínima**: descarta pequenos componentes (ruído) antes da comparação
+- **Grid fixo de prompts**: o SAM usa o mesmo grid regular de pontos (default 32×32) nas duas imagens, garantindo segmentações alinhadas entre T0 e T1.
+- **Histogram matching**: antes do SAM segmentar T1, aplicamos `match_histograms` para aproximar o histograma de cores de T0, reduzindo discrepâncias luminosas.
 
 Esses limiares ficam disponíveis como sliders na UI para você equilibrar cobertura x precisão dependendo do cenário.
+
+> Precisa de um glossário rápido? Veja `METRICS.md` para explicações em linguagem simples sobre IoU, Hausdorff, deltas e grid fixo de prompts.
 
 ## Estrutura do projeto
 
@@ -76,6 +77,8 @@ Esses limiares ficam disponíveis como sliders na UI para você equilibrar cober
 │  ├─ __init__.py
 │  ├─ sam_change_detector.py  # Carrega SAM, segmenta e compara máscaras
 │  └─ visualization.py        # Overlays e mapa de mudanças
+├─ checkpoints/
+│  └─ README.md               # Onde colocar o .pth do SAM
 └─ requirements.txt
 ```
 

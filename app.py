@@ -1,23 +1,49 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
 import gradio as gr
 
 from mvp_sam import SAMChangeDetector
 from mvp_sam.visualization import overlay_masks, render_change_map
 
-SAM_CHECKPOINT_PATH = os.environ.get("SAM_CHECKPOINT_PATH", "checkpoints/sam_vit_b_01ec64.pth")
 _detector: SAMChangeDetector | None = None
+_checkpoint_cache: str | None = None
+
+
+def _resolve_checkpoint_path() -> str:
+    env_path = os.environ.get("SAM_CHECKPOINT_PATH")
+    if env_path:
+        return env_path
+
+    default = Path("checkpoints") / "sam_vit_b_01ec64.pth"
+    if default.exists():
+        return str(default)
+
+    checkpoints_dir = Path("checkpoints")
+    if checkpoints_dir.exists():
+        for candidate in sorted(checkpoints_dir.glob("*.pth")):
+            if candidate.is_file():
+                return str(candidate)
+
+    raise FileNotFoundError(
+        "Nenhum checkpoint SAM encontrado. Coloque o arquivo .pth em 'checkpoints/' "
+        "ou defina a variável SAM_CHECKPOINT_PATH."
+    )
 
 
 def _get_detector() -> SAMChangeDetector:
     global _detector
+    global _checkpoint_cache
     if _detector is None:
         try:
+            checkpoint_path = _checkpoint_cache or _resolve_checkpoint_path()
             _detector = SAMChangeDetector(
-                checkpoint_path=SAM_CHECKPOINT_PATH,
+                checkpoint_path=checkpoint_path,
                 model_type="vit_b",
             )
+            _checkpoint_cache = checkpoint_path
         except FileNotFoundError as exc:
             raise gr.Error(str(exc)) from exc
     return _detector
@@ -31,11 +57,20 @@ def _build_summary(result: dict) -> str:
         f"⚪️ Objetos estáveis: **{len(result['unchanged'])}**",
     ]
 
+    weights = result.get("match_weights", {})
+    if weights:
+        lines.append(
+            f"⚖️ Pesos do matching → IoU: {weights.get('iou', 0.0):.2f} | Hausdorff: {weights.get('hausdorff', 0.0):.2f}"
+        )
+
     if result["modified"]:
         lines.append("\n### Principais mudanças detectadas")
         for idx, entry in enumerate(result["modified"][:5], start=1):
             lines.append(
-                f"{idx}. IoU={entry['iou']:.2f} | Δárea={entry['area_delta']:.2f} | Δcentróide={entry['centroid_shift']:.2f}"
+                (
+                    f"{idx}. IoU={entry['iou']:.2f} | Hausdorff={entry.get('hausdorff', 0.0):.2f} | "
+                    f"Δárea={entry['area_delta']:.2f} | Δcentróide={entry['centroid_shift']:.2f}"
+                )
             )
     else:
         lines.append("\nNenhuma modificação significativa dentro dos limiares atuais.")
@@ -49,6 +84,9 @@ def run_change_detection(
     area_delta: float,
     centroid_delta: float,
     min_area: int,
+    histogram_matching: bool,
+    hausdorff_weight: float,
+    grid_size: int,
 ):
     if image_before is None or image_after is None:
         raise gr.Error("Envie as duas imagens (antes e depois) para continuar.")
@@ -62,6 +100,9 @@ def run_change_detection(
         image_before,
         image_after,
         min_area=int(min_area),
+        histogram_matching=histogram_matching,
+        hausdorff_weight=hausdorff_weight,
+        grid_points_per_side=int(grid_size),
     )
 
     before_overlay = overlay_masks(result["before_image"], result["masks_before"])
@@ -96,6 +137,10 @@ def build_interface() -> gr.Blocks:
             area_delta = gr.Slider(0.05, 0.5, value=0.15, step=0.05, label="Δ Área mínima (fração)")
             centroid_delta = gr.Slider(0.0, 0.2, value=0.05, step=0.01, label="Δ centróide mínima (normalizada)")
             min_area = gr.Slider(64, 5000, value=256, step=64, label="Área mínima do objeto (px)")
+        with gr.Row():
+            histogram_matching = gr.Checkbox(value=True, label="Histogram matching T1→T0")
+            hausdorff_weight = gr.Slider(0.0, 1.0, value=0.35, step=0.05, label="Peso Hausdorff no matching")
+            grid_size = gr.Slider(8, 64, value=32, step=4, label="Grid fixo de prompts (pontos/linha)")
 
         run_button = gr.Button("Detectar mudanças", variant="primary")
 
@@ -107,7 +152,17 @@ def build_interface() -> gr.Blocks:
 
         run_button.click(
             fn=run_change_detection,
-            inputs=[before_input, after_input, match_iou, area_delta, centroid_delta, min_area],
+            inputs=[
+                before_input,
+                after_input,
+                match_iou,
+                area_delta,
+                centroid_delta,
+                min_area,
+                histogram_matching,
+                hausdorff_weight,
+                grid_size,
+            ],
             outputs=[before_out, after_out, change_out, summary],
         )
     return demo
