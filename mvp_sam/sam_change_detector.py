@@ -68,6 +68,7 @@ class SAMChangeDetector:
         fixed_point_grid_size: int = 32,
         modification_area_threshold: float = 0.15,
         modification_shift_threshold: float = 0.05,
+        max_image_edge: Optional[int] = 2048,
     ) -> None:
         if not Path(checkpoint_path).exists():
             raise FileNotFoundError(
@@ -96,6 +97,7 @@ class SAMChangeDetector:
         self.modification_area_threshold = modification_area_threshold
         self.modification_shift_threshold = modification_shift_threshold
         self._generator_overrides = mask_generator_params or {}
+        self.max_image_edge = max_image_edge
 
         self._generator_base_params = dict(
             points_per_side=32,
@@ -262,8 +264,16 @@ class SAMChangeDetector:
             histogram_matching = self.enable_histogram_matching
 
         before_rgb, after_rgb = self._align_inputs(img_before, img_after, histogram_matching)
-        masks_before = self.segment(before_rgb, source="before")
-        masks_after = self.segment(after_rgb, source="after")
+        processed_before, processed_after, scale = self._downscale_if_needed(before_rgb, after_rgb)
+        needs_rescale = processed_before.shape[:2] != before_rgb.shape[:2]
+
+        masks_before = self.segment(processed_before, source="before")
+        masks_after = self.segment(processed_after, source="after")
+
+        if needs_rescale:
+            target_shape = before_rgb.shape[:2]
+            masks_before = self._rescale_masks_to_shape(masks_before, target_shape)
+            masks_after = self._rescale_masks_to_shape(masks_after, target_shape)
 
         if min_area > 0:
             masks_before = [m for m in masks_before if m.area >= min_area]
@@ -310,6 +320,7 @@ class SAMChangeDetector:
             "before_image": before_rgb,
             "after_image": after_rgb,
             "match_weights": {"iou": self.iou_weight, "hausdorff": self.hausdorff_weight},
+            "processing_scale": scale,
         }
 
     # ------------------------------------------------------------------
@@ -340,3 +351,64 @@ class SAMChangeDetector:
         if diagonal == 0:
             return 0.0
         return float(np.linalg.norm(after_centroid - before_centroid) / diagonal)
+
+    def _downscale_if_needed(
+        self,
+        before: np.ndarray,
+        after: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, float]:
+        if not self.max_image_edge:
+            return before, after, 1.0
+        height, width = before.shape[:2]
+        max_dim = max(height, width)
+        if max_dim <= self.max_image_edge:
+            return before, after, 1.0
+
+        scale = float(self.max_image_edge) / float(max_dim)
+        new_width = max(1, int(round(width * scale)))
+        new_height = max(1, int(round(height * scale)))
+
+        resized_before = cv2.resize(before, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        resized_after = cv2.resize(after, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        return resized_before, resized_after, scale
+
+    def _rescale_masks_to_shape(
+        self,
+        masks: List[MaskItem],
+        target_shape: Tuple[int, int],
+    ) -> List[MaskItem]:
+        target_height, target_width = target_shape
+        rescaled: List[MaskItem] = []
+        for mask in masks:
+            if mask.segmentation.shape[:2] == target_shape:
+                rescaled.append(mask)
+                continue
+            resized = cv2.resize(
+                mask.segmentation.astype(np.uint8),
+                (target_width, target_height),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+            bbox = self._bbox_from_mask(resized)
+            area = int(resized.sum())
+            rescaled.append(
+                MaskItem(
+                    mask_id=mask.mask_id,
+                    segmentation=resized,
+                    bbox=bbox,
+                    area=area,
+                    score=mask.score,
+                    source=mask.source,
+                )
+            )
+        return rescaled
+
+    @staticmethod
+    def _bbox_from_mask(mask: np.ndarray) -> Tuple[int, int, int, int]:
+        rows, cols = np.where(mask)
+        if len(rows) == 0 or len(cols) == 0:
+            return (0, 0, 0, 0)
+        x_min = int(cols.min())
+        x_max = int(cols.max())
+        y_min = int(rows.min())
+        y_max = int(rows.max())
+        return (x_min, y_min, x_max - x_min + 1, y_max - y_min + 1)

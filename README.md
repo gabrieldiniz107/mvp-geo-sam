@@ -1,103 +1,128 @@
 # SAM Change Detection MVP
 
-Sistema de detecção de mudanças baseado no Segment Anything Model (SAM) pensado para rodar localmente no seu MacBook M4. A estratégia segue o pipeline conceitual:
+MVP de detecção de mudanças usando o Segment Anything Model (SAM) com foco em rodar localmente (CPU, MPS ou CUDA). O app recebe um par de imagens *antes/depois*, roda o SAM duas vezes com o mesmo grid de prompts, compara as máscaras com métricas ajustáveis e retorna um mapa visual das mudanças acompanhado de um resumo textual.
 
-1. SAM segmenta a imagem **antes** → obtém máscaras A
-2. SAM segmenta a imagem **depois** → obtém máscaras B
-3. Comparamos A vs. B usando IoU
-4. Classificamos os objetos em **novos**, **removidos** ou **modificados** e geramos um mapa visual interpretável
+## Visão geral do que está pronto
 
-## Por que SAM?
+- Segmentação automática com SAM `vit_b` + patch para evitar tensores `float64` em Apple Silicon.
+- Equalização opcional de histogramas (T1 → T0) para reduzir falsos positivos causados por iluminação.
+- Grid fixo de prompts configurável (até 64x64) para garantir que o modelo observe os mesmos pontos nas duas datas.
+- Classificação em objetos **novos**, **removidos**, **modificados** e **estáveis**, incluindo deltas de área e deslocamento de centróide.
+- Interface Gradio com sliders para todos os limiares relevantes, além de overlays de máscaras e mapa de mudança colorido.
 
-**Vantagens**
-- ✅ SAM é gratuito e oferece segmentação potente out-of-the-box
-- ✅ Responde muito bem a mudanças estruturais (construções, estradas, desmatamento)
-- ✅ Dispensa um modelo específico de change detection
-- ✅ Totalmente interpretável: cada máscara é visível e ajustável
+## Pipeline de detecção
 
-**Desvantagens**
-- ❌ Não é otimizado para change detection — exige pós-processamento
-- ❌ Pode produzir muitos falsos positivos se os limiares forem baixos
-- ❌ Mudanças muito sutis (iluminação, objetos pequenos) são difíceis
-- ❌ Precisa de tuning e filtragem extra para casos ruidosos
+1. Normalizamos as duas imagens (RGB, uint8 e resolução compatível). Opcionalmente aplicamos histogram matching em T1.
+2. Limitamos a maior dimensão para `max_image_size` (default 1536 px) para manter a inferência viável.
+3. O SAM gera máscaras para *antes* e *depois* usando o mesmo grid fixo de prompts.
+4. Filtramos máscaras pequenas (`min_area`) e comparamos cada máscara de T0 com T1 usando IoU + Hausdorff.
+5. Um par é aceito se atingir o limiar de IoU **ou** o limiar do score combinado. A partir daí:
+   - sem par em T1 → objeto removido;
+   - sem par em T0 → objeto novo;
+   - par aceito + Δ área / Δ centróide acima dos limiares → modificado;
+   - caso contrário → estável.
+6. Geramos overlays, mapa colorido, lista de top mudanças e estatísticas agregadas para a interface.
 
-## Requisitos
+## Componentes e estrutura
 
-- Python 3.10+
-- Torch 2.x com suporte a CPU/MPS (Apple Silicon)
-- Dependências Python listadas em `requirements.txt`
-- Peso do modelo **SAM base (vit_b)** — recomendado `sam_vit_b_01ec64.pth`
+```
+├─ app.py                     # Interface Gradio, sliders e orquestração
+├─ mvp_sam/
+│  ├─ sam_change_detector.py  # Carregamento do SAM, matching e pós-processamento
+│  ├─ visualization.py        # Overlays e mapa de calor das mudanças
+│  └─ sam_patches.py          # Patch para o generator do SAM rodar em MPS
+├─ checkpoints/README.md      # Passo a passo para posicionar o .pth
+└─ requirements.txt
+```
 
-## Instalação
+`SAMChangeDetector` encapsula todo o fluxo: alinhamento das imagens, geração das máscaras, matching, classificação das mudanças e normalização dos pesos IoU/Hausdorff. O módulo `visualization` cuida apenas do pós-processamento gráfico.
+
+## Requisitos rápidos
+
+- Python 3.11
+- PyTorch 2.x com backend compatível (`cpu`, `mps` ou `cuda`).
+- Dependências listadas em `requirements.txt` (Gradio, OpenCV, scikit-image, etc.).
+- Checkpoint `sam_vit_b_01ec64.pth` (≈360 MB). Outros modelos do SAM funcionam se ajustados manualmente.
+
+## Instalação e setup
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Baixe o checkpoint do SAM (aprox. 360 MB) no site oficial e coloque o arquivo `sam_vit_b_01ec64.pth` dentro de `checkpoints/` (já versionada com instruções). O app procura automaticamente ali; use a variável `SAM_CHECKPOINT_PATH` apenas se quiser apontar para outro local.
+> Dica Apple Silicon: se ainda não tiver PyTorch instalado, use  
+> `pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cpu`
 
-> **Dica**: para Apple Silicon use `pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cpu` se ainda não tiver torch instalado.
+### Checkpoint do SAM
 
-## Executando o app (Gradio)
+1. Baixe `sam_vit_b_01ec64.pth` do repositório oficial do SAM.
+2. Coloque o arquivo em `checkpoints/` (já existe um README lá dentro com instruções rápidas).
+3. Opcional: defina `SAM_CHECKPOINT_PATH=/caminho/para/sam_vit_b_01ec64.pth` se desejar usar outro local ou nome.
+
+Se nenhum checkpoint for encontrado, o app lança um erro amigável na interface.
+
+## Executando a interface Gradio
 
 ```bash
 python app.py
 ```
 
-A interface abre no navegador. Faça upload das imagens **antes** e **depois**, ajuste os sliders e clique em **Detectar mudanças**. Você verá:
+- A UI abre no navegador padrão (Gradio) e também envia um link local.
+- Faça upload das imagens **Antes** e **Depois**, ajuste os parâmetros e clique em **Detectar mudanças**.
+- Saídas:
+  - `Antes + Máscaras`: overlay colorido com todas as máscaras aceitas pelo SAM.
+  - `Depois + Máscaras`: mesmo overlay para a imagem T1.
+  - `Mapa de Mudanças`: legenda fixa (verde = novos, vermelho = removidos, amarelo = modificados, cinza = estável).
+  - Resumo textual: contagens, pesos usados no matching e top 5 mudanças (IoU, Hausdorff, Δ área e Δ centróide).
 
-- Imagem antes com as máscaras identificadas pelo SAM
-- Imagem depois com as novas máscaras
-- Mapa de mudanças colorido (Verde = novos, Vermelho = removidos, Amarelo = modificados, Cinza = estáveis)
-- Resumo textual com contagens e principais alterações (IoU, delta de área, deslocamento de centróide)
+## Parâmetros e métricas disponíveis
 
-## Estratégias e parâmetros
+- **Limiar IoU para matching** – Interseção sobre União entre a máscara antes/depois (0–1). Serve como critério direto de similaridade.
+- **Peso Hausdorff no matching** – Controla o quanto o score final privilegia o contorno (Hausdorff) versus a sobreposição (IoU).  
+  Score final = `w_iou * IoU + w_hausdorff * SimilaridadeHausdorff`, com `w_iou + w_hausdorff = 1`.
+- **Score final de matching (implícito)** – Além do limiar de IoU, o par também precisa passar pelo limiar de `score` configurado no detector (default 0.5).
+- **Δ Área mínima (fração)** – Variação relativa entre as áreas das máscaras aceitas. Ex.: 0.15 = mudou 15% ou mais.
+- **Δ centróide mínima** – Distância entre os centróides antes/depois normalizada pelo tamanho da imagem. Detecta deslocamentos mesmo quando a área permanece parecida.
+- **Área mínima do objeto** – Remove componentes pequenos antes do matching para reduzir ruído (default 256 px²).
+- **Histogram matching T1→T0** – Ajusta o histograma da imagem *depois* para se parecer com *antes*, reduzindo diferenças de sensor/iluminação.
+- **Grid fixo de prompts (pontos/linha)** – Define o número de prompts regulares enviados ao SAM (entre 8 e 64). Mais pontos = mais máscaras e custo computacional.
+- **Resolução máxima para processamento** – Reamostramos as imagens para que a maior borda não passe desse valor. Ajuda a manter a inferência dentro do limite de memória.
 
-- **IoU para matching**: máscara só é pareada se IoU ≥ limiar (default 0.45)
-- **Peso Hausdorff**: o slider controla quanto o matching privilegia a distância de Hausdorff normalizada (0 = só IoU, 1 = só Hausdorff). O score final precisa passar por um limiar extra para ser considerado válido.
-- **Objetos novos**: máscaras na imagem *depois* sem par correspondente
-- **Objetos removidos**: máscaras na imagem *antes* sem par correspondente
-- **Objetos modificados**: pares com IoU válido porém variação de área ≥ limiar ou deslocamento de centróide ≥ limiar
-- **Filtro de área mínima**: descarta pequenos componentes (ruído) antes da comparação
-- **Grid fixo de prompts**: o SAM usa o mesmo grid regular de pontos (default 32×32) nas duas imagens, garantindo segmentações alinhadas entre T0 e T1.
-- **Histogram matching**: antes do SAM segmentar T1, aplicamos `match_histograms` para aproximar o histograma de cores de T0, reduzindo discrepâncias luminosas.
+## Como funciona por baixo dos panos
 
-Esses limiares ficam disponíveis como sliders na UI para você equilibrar cobertura x precisão dependendo do cenário.
+1. **Preparação**: `SAMChangeDetector` garante imagens RGB `uint8`, iguala histogramas se solicitado e redimensiona para respeitar `max_image_edge`.
+2. **Patch MPS**: `ensure_float32_mps_patch` substitui `_process_batch` do `SamAutomaticMaskGenerator` para trabalhar só com `float32` em MPS.
+3. **Segmentação com grid fixo**: usamos `build_all_layer_point_grids` para gerar o mesmo conjunto de prompts em T0 e T1, garantindo alinhamento espacial.
+4. **Matching**: para cada máscara de T0 buscamos a melhor de T1 baseada no score híbrido IoU + Hausdorff. O processo evita reuso de máscaras para manter o matching 1:1.
+5. **Classificação**: comparamos variação de área e deslocamento de centróide; aplicamos filtros de área mínima e contabilizamos novos/removidos/modificados/estáveis.
+6. **Visualização**: `overlay_masks` colore as máscaras originais e `render_change_map` pinta o mapa final por classe, reaproveitando as máscaras escaladas.
+7. **Resumo textual**: `_build_summary` destaca contagens, pesos usados e até cinco principais mudanças (ordenadas pela lista de modificados).
 
-> Precisa de um glossário rápido? Veja `METRICS.md` para explicações em linguagem simples sobre IoU, Hausdorff, deltas e grid fixo de prompts.
+## Dicas de uso e performance
 
-## Estrutura do projeto
-
-```
-├─ app.py                # Interface Gradio e orquestração
-├─ mvp_sam/
-│  ├─ __init__.py
-│  ├─ sam_change_detector.py  # Carrega SAM, segmenta e compara máscaras
-│  └─ visualization.py        # Overlays e mapa de mudanças
-├─ checkpoints/
-│  └─ README.md               # Onde colocar o .pth do SAM
-└─ requirements.txt
-```
-
-## Extensões sugeridas
-
-1. **SAM 2 com tracking**: formar um “pseudo-vídeo” (antes → depois) e usar o tracker para objetos persistentes vs. transitórios.
-2. **Métricas adicionais**: combinar IoU com similaridade de contorno ou descritores shape-context para reduzir falsos positivos.
-3. **Pós-processamento geoespacial**: unir máscaras vizinhas, aplicar buffers e exportar para shapefile/GeoJSON.
+- Ajuste `min_area` para reduzir ruído em cenas urbanas densas; para vegetação ou objetos grandes, valores entre 512 e 2048 costumam ajudar.
+- `max_image_size` em 1024–2048 mantém o throughput viável em CPU/MPS sem perder muito detalhe.
+- Para detectar mudanças sutis, aumente o grid e reduza `min_area`, mas monitore o tempo de inferência (matching é `O(n²)` no número de máscaras).
+- Se o resultado estiver muito ruidoso:
+  - reduza o peso Hausdorff (deixe mais IoU),
+  - aumente o limiar de IoU,
+  - desative histogram matching quando as imagens já estão balanceadas.
 
 ## Limitações conhecidas
 
-- Dependemos de segmentações consistentes; sombras ou iluminação podem quebrar o matching.
-- A etapa de matching é `O(n²)` com o número de máscaras; convém ajustar o `min_area` para áreas grandes.
-- O modelo SAM base requer ~4 GB de RAM durante inferência — feche outros apps pesados ao usar no M4.
+- SAM não foi treinado especificamente para change detection; ainda precisamos de pós-processamento pesado para evitar falsos positivos.
+- Diferenças de sombra, sazonalidade ou pequenos objetos muito próximos costumam confundir o matching.
+- O processo de matching escala quadraticamente com o número de máscaras; grids grandes em imagens de alta resolução tornam o app lento.
+- O modelo `vit_b` consome ~4 GB de RAM durante inferência. Feche aplicativos pesados antes de rodar no MacBook M4.
 
-## Próximos passos
+## Próximos passos sugeridos
 
-- Adicionar persistência das máscaras para inspeção manual (JSON/GeoJSON).
-- Explorar integrações com SAM 2 ou métodos híbridos (SAM + UNet leve) para mudanças sutis.
-- Criar testes automatizados com imagens sintéticas para validar o comparador.
+1. Persistir os resultados (máscaras, bounding boxes e métricas) em JSON/GeoJSON para análise offline.
+2. Integrar o SAM 2 com o tracker para construir pares T0/T1 como “pseudo-vídeos”.
+3. Adicionar métricas extras de contorno (ex.: shape context) ou filtros baseados em textura para reduzir falsos positivos em vegetação.
+4. Construir testes sintéticos automatizados para validar o matching e evitar regressões.
 
-Bom proveito! Qualquer ajuste específico (ex.: outro backend de UI, integração com pipeline geoespacial) é só pedir.
+Qualquer dúvida ou ideia de extensão (novo backend, exportação geoespacial, etc.) é só abrir um issue ou comentar. Bons experimentos!

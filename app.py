@@ -87,6 +87,7 @@ def run_change_detection(
     histogram_matching: bool,
     hausdorff_weight: float,
     grid_size: int,
+    max_image_size: int,
 ):
     if image_before is None or image_after is None:
         raise gr.Error("Envie as duas imagens (antes e depois) para continuar.")
@@ -95,6 +96,7 @@ def run_change_detection(
     detector.match_iou_threshold = match_iou
     detector.modification_area_threshold = area_delta
     detector.modification_shift_threshold = centroid_delta
+    detector.max_image_edge = int(max_image_size)
 
     result = detector.detect_changes(
         image_before,
@@ -141,6 +143,13 @@ def build_interface() -> gr.Blocks:
             histogram_matching = gr.Checkbox(value=True, label="Histogram matching T1→T0")
             hausdorff_weight = gr.Slider(0.0, 1.0, value=0.35, step=0.05, label="Peso Hausdorff no matching")
             grid_size = gr.Slider(8, 64, value=32, step=4, label="Grid fixo de prompts (pontos/linha)")
+            max_image_size = gr.Slider(
+                512,
+                4096,
+                value=1536,
+                step=128,
+                label="Resolução máxima para processamento (px)",
+            )
 
         run_button = gr.Button("Detectar mudanças", variant="primary")
 
@@ -162,6 +171,7 @@ def build_interface() -> gr.Blocks:
                 histogram_matching,
                 hausdorff_weight,
                 grid_size,
+                max_image_size,
             ],
             outputs=[before_out, after_out, change_out, summary],
         )
