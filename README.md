@@ -118,11 +118,3 @@ python app.py
 - O processo de matching escala quadraticamente com o número de máscaras; grids grandes em imagens de alta resolução tornam o app lento.
 - O modelo `vit_b` consome ~4 GB de RAM durante inferência. Feche aplicativos pesados antes de rodar no MacBook M4.
 
-## Próximos passos sugeridos
-
-1. Persistir os resultados (máscaras, bounding boxes e métricas) em JSON/GeoJSON para análise offline.
-2. Integrar o SAM 2 com o tracker para construir pares T0/T1 como “pseudo-vídeos”.
-3. Adicionar métricas extras de contorno (ex.: shape context) ou filtros baseados em textura para reduzir falsos positivos em vegetação.
-4. Construir testes sintéticos automatizados para validar o matching e evitar regressões.
-
-Qualquer dúvida ou ideia de extensão (novo backend, exportação geoespacial, etc.) é só abrir um issue ou comentar. Bons experimentos!
